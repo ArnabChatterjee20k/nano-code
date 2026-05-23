@@ -1,3 +1,4 @@
+mod tools;
 use std::io::Write;
 use std::{fmt, io};
 #[allow(dead_code)]
@@ -51,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         io::stdout().flush()?;
 
         let mut input = String::new();
+        // ? is popping the error so that error is thrown and run is stopped
         let bytes = io::stdin().read_line(&mut input)?;
         if bytes == 0 {
             break;
