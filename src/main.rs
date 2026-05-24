@@ -1,10 +1,11 @@
 mod agent;
 mod tools;
 use dotenvy::dotenv;
+use futures::StreamExt;
 use std::io::Write;
 use std::{fmt, io};
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentEvent};
 #[allow(dead_code)]
 #[derive(Debug, Copy, Clone)]
 pub enum Ansi {
@@ -70,8 +71,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             _ => {
-                let response = agent.chat(value).await?;
-                log!(Ansi::Cyan, "{}", response);
+                let mut response = agent.chat(value);
+                while let Some(event) = response.next().await {
+                    match event {
+                        AgentEvent::TextChunk(text) => {
+                            log!(Ansi::Cyan, "{}", text);
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }
