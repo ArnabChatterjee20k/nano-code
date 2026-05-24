@@ -1,6 +1,10 @@
+mod agent;
 mod tools;
+use dotenvy::dotenv;
 use std::io::Write;
 use std::{fmt, io};
+
+use crate::agent::Agent;
 #[allow(dead_code)]
 #[derive(Debug, Copy, Clone)]
 pub enum Ansi {
@@ -43,8 +47,10 @@ macro_rules! log_separator {
         println!("{}{}{}", Ansi::Dim, line, Ansi::Reset)
     }};
 }
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok();
+    let agent = Agent::new();
     log!(Ansi::Bold, "nano-code");
     loop {
         log_separator!();
@@ -57,12 +63,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if bytes == 0 {
             break;
         }
-        match input.trim() {
+        let value = input.trim();
+        match value {
             "/q" => {
                 log!(Ansi::Cyan, "Thanks for using nano-code!");
                 break;
             }
-            _ => {}
+            _ => {
+                let response = agent.chat(value).await?;
+                log!(Ansi::Cyan, "{}", response);
+            }
         }
     }
     Ok(())

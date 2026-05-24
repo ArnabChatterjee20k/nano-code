@@ -311,11 +311,7 @@ mod tests {
     fn grep_finds_pattern_with_path_line_format() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().to_str().unwrap();
-        fs::write(
-            dir.path().join("a.txt"),
-            "alpha\nbeta needle here\ngamma\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("a.txt"), "alpha\nbeta needle here\ngamma\n").unwrap();
         fs::write(dir.path().join("b.txt"), "no match\n").unwrap();
 
         let out = grep("needle", base, None).unwrap();
