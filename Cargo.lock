@@ -802,6 +802,7 @@ dependencies = [
  "futures",
  "glob",
  "regex",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

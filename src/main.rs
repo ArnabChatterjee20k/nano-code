@@ -2,10 +2,12 @@ mod agent;
 mod tools;
 use dotenvy::dotenv;
 use futures::StreamExt;
+use std::fmt::format;
 use std::io::Write;
-use std::{fmt, io};
+use std::{fmt, io, result};
 
 use crate::agent::{Agent, AgentEvent};
+use crate::tools::get_tools;
 #[allow(dead_code)]
 #[derive(Debug, Copy, Clone)]
 pub enum Ansi {
@@ -51,7 +53,7 @@ macro_rules! log_separator {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
-    let agent = Agent::new();
+    let agent = Agent::new(get_tools());
     log!(Ansi::Bold, "nano-code");
     loop {
         log_separator!();
@@ -77,7 +79,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         AgentEvent::TextChunk(text) => {
                             log!(Ansi::Cyan, "{}", text);
                         }
-                        _ => {}
+                        AgentEvent::ToolChunk(name, args) => {
+                            let args_values: Vec<String> = args
+                                .as_object()
+                                .unwrap()
+                                .values()
+                                .map(|v| v.to_string().chars().take(30).collect::<String>())
+                                .collect();
+                            let args_preview = args_values.join(",");
+                            log!(Ansi::Green, "({})", args_preview);
+                            match agent.call_tool(&name.to_string(), args) {
+                                Ok(result) => {
+                                    let result_lines: Vec<&str> = result.split("\n").collect();
+                                    let preview = result_lines[0];
+
+                                    let mut first_60 = preview.chars().take(60).collect::<String>();
+
+                                    if result_lines.len() > 1 {
+                                        first_60.push_str(&format!(
+                                            "... + {} lines",
+                                            result_lines.len() - 1
+                                        ));
+                                    }
+
+                                    log!(Ansi::Dim, "⎿ {}", first_60);
+                                }
+                                Err(e) => {
+                                    log!(Ansi::Red, "Error {}", e);
+                                }
+                            }
+                        }
+                        AgentEvent::Error(e) => {
+                            log!(Ansi::Red, "Error {}", e);
+                        }
                     }
                 }
             }

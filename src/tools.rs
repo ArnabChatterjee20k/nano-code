@@ -1,8 +1,11 @@
 use std::{fs, io::BufRead, path::PathBuf, time::SystemTime};
 
 use regex::Regex;
+use serde_json::Value;
 
-pub type ToolResult = Result<String, Box<dyn std::error::Error>>;
+use crate::agent::Tool;
+
+pub type ToolResult = Result<String, Box<dyn std::error::Error + Send + Sync>>;
 
 pub fn read(path: &str, offset: usize, limit: Option<usize>) -> ToolResult {
     let file = fs::read_to_string(path)?;
@@ -119,6 +122,138 @@ pub fn bash(cmd: &str) -> ToolResult {
         return Ok("(empty)".to_string());
     };
     Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+pub fn tool_read(args: Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let path = args["path"].as_str().ok_or("missing 'path'")?;
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    read(path, offset, limit)
+}
+
+pub fn tool_write(args: Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let path = args["path"].as_str().ok_or("missing 'path'")?;
+    let content = args["content"].as_str().ok_or("missing 'content'")?;
+    write(path, content)
+}
+
+pub fn tool_edit(args: Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let path = args["path"].as_str().ok_or("missing 'path'")?;
+    let old = args["old"].as_str().ok_or("missing 'old'")?;
+    let new = args["new"].as_str().ok_or("missing 'new'")?;
+    let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+    edit(path, old, new, all)
+}
+
+pub fn tool_glob(args: Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let pattern = args["pattern"].as_str().ok_or("missing 'pattern'")?;
+    let base = args.get("base").and_then(|v| v.as_str()).unwrap_or(".");
+    glob_files(pattern, base)
+}
+
+pub fn tool_grep(args: Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let pattern = args["pattern"].as_str().ok_or("missing 'pattern'")?;
+    let base = args.get("base").and_then(|v| v.as_str()).unwrap_or(".");
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    grep(pattern, base, limit)
+}
+
+pub fn tool_bash(args: Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let cmd = args["cmd"].as_str().ok_or("missing 'cmd'")?;
+    bash(cmd)
+}
+
+pub fn get_tools() -> Vec<Tool> {
+    vec![
+        Tool {
+            name: "read".to_string(),
+            description: "Read file with line numbers".to_string(),
+            callback: tool_read as fn(Value) -> _,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["path"]
+            })),
+        },
+        Tool {
+            name: "write".to_string(),
+            description: "Write content to file".to_string(),
+            callback: tool_write as fn(Value) -> _,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            })),
+        },
+        Tool {
+            name: "edit".to_string(),
+            description: "Replace old with new in file (old must be unique unless all=true)"
+                .to_string(),
+            callback: tool_edit as fn(Value) -> _,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old": { "type": "string" },
+                    "new": { "type": "string" },
+                    "all": { "type": "boolean" }
+                },
+                "required": ["path", "old", "new"]
+            })),
+        },
+        Tool {
+            name: "glob".to_string(),
+            description: "Find files by pattern, sorted by mtime".to_string(),
+            callback: tool_glob as fn(Value) -> _,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "base": { "type": "string" }
+                },
+                "required": ["pattern"]
+            })),
+        },
+        Tool {
+            name: "grep".to_string(),
+            description: "Search files for regex pattern".to_string(),
+            callback: tool_grep as fn(Value) -> _,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "base": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["pattern"]
+            })),
+        },
+        Tool {
+            name: "bash".to_string(),
+            description: "Run shell command".to_string(),
+            callback: tool_bash as fn(Value) -> _,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string" }
+                },
+                "required": ["cmd"]
+            })),
+        },
+    ]
 }
 
 #[cfg(test)]
