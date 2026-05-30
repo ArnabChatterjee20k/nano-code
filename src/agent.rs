@@ -13,7 +13,7 @@ use async_openai::{
 };
 use serde_json::Value;
 
-use crate::memory::{Memory, Message};
+use crate::memory::{Memory, Message, ToolCallRecord};
 use crate::tools::ToolResult;
 
 const DEFAULT_MODEL: &str = "google/gemini-3.5-flash";
@@ -144,11 +144,13 @@ impl Agent {
             // Chunk 4: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "main.rs\"}" } }] } }
             // Final:   { "finish_reason": "tool_calls" }
             let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
+            let mut content_buffer = String::new();
             while let Some(chunk_result) = response.next().await {
                 match chunk_result {
                     Ok(chunk) => {
                         for choice in chunk.choices {
                             if let Some(content) = choice.delta.content {
+                                content_buffer.push_str(&content);
                                 yield AgentEvent::TextChunk(content);
                             }
 
@@ -175,28 +177,104 @@ impl Agent {
                                 }
                             }
 
-                            if matches!(choice.finish_reason, Some(FinishReason::ToolCalls)) {
-                                let mut pending_calls: Vec<(u32, PendingToolCall)> = pending_tool_calls
-                                    .drain()
-                                    .collect();
-                                pending_calls.sort_by_key(|(index, _)| *index);
+                            match choice.finish_reason {
+                                Some(FinishReason::ToolCalls) => {
+                                    let mut pending_calls: Vec<(u32, PendingToolCall)> = pending_tool_calls
+                                        .drain()
+                                        .collect();
+                                    pending_calls.sort_by_key(|(index, _)| *index);
 
-                                // TODO: we can concurrently run this for the read tool calls but we need to add a category like READ, WRITE to each tool
-                                for (_, pending_call) in pending_calls {
-                                    let name = pending_call.name.unwrap_or_else(|| "unknown".to_string());
-                                    let arguments_value = serde_json::from_str(&pending_call.arguments)
-                                    .unwrap_or_else(|_| Value::String(pending_call.arguments));
+                                    let mut records: Vec<ToolCallRecord> = Vec::new();
+                                    let mut dispatchable: Vec<(String, String, Value)> = Vec::new();
 
-                                    yield AgentEvent::ToolChunk(name.clone(),arguments_value.clone());
-                                    match self.call_tool(&name, arguments_value) {
-                                        Ok(output) => {
-                                            yield AgentEvent::TextChunk(output);
+                                    for (_, pending_call) in pending_calls {
+                                        let Some(id) = pending_call.id else {
+                                            yield AgentEvent::Error(
+                                                "tool_call missing id, skipping".to_string(),
+                                            );
+                                            continue;
+                                        };
+                                        let name = pending_call
+                                            .name
+                                            .unwrap_or_else(|| "unknown".to_string());
+                                        let arguments_str = pending_call.arguments;
+                                        let arguments_value = serde_json::from_str(&arguments_str)
+                                            .unwrap_or_else(|_| Value::String(arguments_str.clone()));
+
+                                        records.push(ToolCallRecord {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            arguments: arguments_str,
+                                        });
+                                        dispatchable.push((id, name, arguments_value));
+                                    }
+
+                                    if !records.is_empty() {
+                                        let content = if content_buffer.is_empty() {
+                                            None
+                                        } else {
+                                            Some(std::mem::take(&mut content_buffer))
+                                        };
+                                        if let Err(e) = memory.update(Message::Assistant {
+                                            content,
+                                            tool_calls: records,
+                                        }) {
+                                            yield AgentEvent::Error(format!(
+                                                "Failed to record assistant message: {}",
+                                                e
+                                            ));
                                         }
-                                        Err(e) => {
-                                            yield AgentEvent::Error(format!("Tool '{}' error: {}", name, e));
+                                    }
+
+                                    // TODO: we can concurrently run this for the read tool calls but we need to add a category like READ, WRITE to each tool
+                                    for (id, name, args_value) in dispatchable {
+                                        yield AgentEvent::ToolChunk(name.clone(), args_value.clone());
+                                        match self.call_tool(&name, args_value) {
+                                            Ok(output) => {
+                                                if let Err(e) = memory.update(Message::Tool(
+                                                    id.clone(),
+                                                    output.clone(),
+                                                )) {
+                                                    yield AgentEvent::Error(format!(
+                                                        "Failed to record tool result: {}",
+                                                        e
+                                                    ));
+                                                }
+                                                yield AgentEvent::TextChunk(output);
+                                            }
+                                            Err(e) => {
+                                                let err_msg = format!("error: {}", e);
+                                                if let Err(me) =
+                                                    memory.update(Message::Tool(id, err_msg))
+                                                {
+                                                    yield AgentEvent::Error(format!(
+                                                        "Failed to record tool error: {}",
+                                                        me
+                                                    ));
+                                                }
+                                                yield AgentEvent::Error(format!(
+                                                    "Tool '{}' error: {}",
+                                                    name, e
+                                                ));
+                                            }
                                         }
                                     }
                                 }
+                                Some(FinishReason::Stop) => {
+                                    if !content_buffer.is_empty() {
+                                        let content = std::mem::take(&mut content_buffer);
+                                        if let Err(e) = memory.update(Message::Assistant {
+                                            content: Some(content),
+                                            tool_calls: vec![],
+                                        }) {
+                                            yield AgentEvent::Error(format!(
+                                                "Failed to record assistant message: {}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
