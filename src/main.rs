@@ -125,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         AgentEvent::Error(e) => {
                             log!(Ansi::Red, "Error {}", e);
                         }
+                        AgentEvent::Done => {}
                     }
                 }
             }

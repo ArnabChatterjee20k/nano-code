@@ -6,9 +6,9 @@ use async_openai::types::{
 };
 
 pub struct ToolCallRecord {
-     pub id: String,
-     pub name: String,
-     pub arguments: String,  // raw JSON string
+    pub id: String,
+    pub name: String,
+    pub arguments: String, // raw JSON string
 }
 
 // Tool is for tool_id and its output
@@ -18,7 +18,10 @@ pub enum Message {
     System(String),
     User(String),
     Tool(String, String),
-    Assistant{content: Option<String>, tool_calls: Vec<ToolCallRecord>}
+    Assistant {
+        content: Option<String>,
+        tool_calls: Vec<ToolCallRecord>,
+    },
 }
 
 pub struct Memory {
@@ -54,7 +57,10 @@ impl Memory {
                 .content(content)
                 .build()?
                 .into(),
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let calls: Vec<ChatCompletionMessageToolCall> = tool_calls
                     .into_iter()
                     .map(|t| ChatCompletionMessageToolCall {

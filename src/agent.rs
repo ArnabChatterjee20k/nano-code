@@ -22,6 +22,7 @@ pub enum AgentEvent {
     TextChunk(String),
     ToolChunk(String, serde_json::Value),
     Error(String),
+    Done
 }
 pub type AgentEventStream<'a> =
     std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send + 'a>>;
@@ -83,7 +84,7 @@ impl Agent {
 
         (tool.callback)(args)
     }
-
+    // here the async_stream::stream! { … } as a single coroutine. Everything that needs yield or .await lives inside it. The function around it is just a one-line shell
     pub fn chat<'a>(&'a self, prompt: &'a str, memory: &'a mut Memory) -> AgentEventStream<'a> {
         let model = std::env::var("MODEL_NAME").unwrap_or(DEFAULT_MODEL.to_string());
         let stream = async_stream::stream! {
@@ -113,177 +114,191 @@ impl Agent {
                     },
                 })
                 .collect();
-            // since we are catching the error ourselves and sending via stream we can't use ? in any of the build() now
-            // and manually need to match the build output
-            let request: CreateChatCompletionRequest = match CreateChatCompletionRequestArgs::default()
-                .model(model)
-                .max_tokens(8162 as u32)
-                .messages(memory.messages().clone())
-                .tools(tools_defs)
-                .tool_choice(ChatCompletionToolChoiceOption::Auto)
-                .build()
-                    {
-                        Ok(msg) => msg.into(),
-                        Err(e) => {
-                            yield AgentEvent::Error(format!("Failed to build user message: {}", e));
-                            return;
-                        }
-                    };
-            let mut response = match self.client.chat().create_stream(request).await {
-                Ok(s) => s,
-                Err(e) => {
-                    yield AgentEvent::Error(e.to_string());
+
+            // agentic loop -> call api -> tool called -> call the tool -> take the output in the memory and call the api again
+            let mut rounds = 0;
+            loop{
+                rounds+=1;
+                if rounds > 30 {
+                    yield AgentEvent::Error("Max iterations exceeded".to_string());
                     return;
                 }
-            };
-
-            // Tool call streaming(based on the index we can determine the tool in case of multi tool streaming)
-            // Chunk 1: { "delta": { "tool_calls": [{ "index": 0, "id": "call_1" }] } }
-            // Chunk 2: { "delta": { "tool_calls": [{ "index": 0, "function": { "name": "read_file" } }] } }
-            // Chunk 3: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "{\"path\":\"src/" } }] } }
-            // Chunk 4: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "main.rs\"}" } }] } }
-            // Final:   { "finish_reason": "tool_calls" }
-            let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
-            let mut content_buffer = String::new();
-            while let Some(chunk_result) = response.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        for choice in chunk.choices {
-                            if let Some(content) = choice.delta.content {
-                                content_buffer.push_str(&content);
-                                yield AgentEvent::TextChunk(content);
+                // since we are catching the error ourselves and sending via stream we can't use ? in any of the build() now
+                // and manually need to match the build output
+                let request: CreateChatCompletionRequest = match CreateChatCompletionRequestArgs::default()
+                    .model(model.clone())
+                    .max_tokens(8162 as u32)
+                    .messages(memory.messages().clone())
+                    .tools(tools_defs.clone())
+                    .tool_choice(ChatCompletionToolChoiceOption::Auto)
+                    .build()
+                        {
+                            Ok(msg) => msg.into(),
+                            Err(e) => {
+                                yield AgentEvent::Error(format!("Failed to build request: {}", e));
+                                return;
                             }
+                        };
+                let mut response = match self.client.chat().create_stream(request).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        yield AgentEvent::Error(e.to_string());
+                        return;
+                    }
+                };
 
-                            if let Some(tool_calls) = choice.delta.tool_calls {
-                                for tool_call in tool_calls {
-                                    // get or create the value for tool_call.index
-                                    let entry = pending_tool_calls
-                                        .entry(tool_call.index)
-                                        .or_default();
+                // Tool call streaming(based on the index we can determine the tool in case of multi tool streaming)
+                // Chunk 1: { "delta": { "tool_calls": [{ "index": 0, "id": "call_1" }] } }
+                // Chunk 2: { "delta": { "tool_calls": [{ "index": 0, "function": { "name": "read_file" } }] } }
+                // Chunk 3: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "{\"path\":\"src/" } }] } }
+                // Chunk 4: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "main.rs\"}" } }] } }
+                // Final:   { "finish_reason": "tool_calls" }
+                let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
+                let mut content_buffer = String::new();
 
-                                    if let Some(id) = tool_call.id {
-                                        entry.id = Some(id);
-                                    }
+                // streaming loop
+                while let Some(chunk_result) = response.next().await {
+                    match chunk_result {
+                        Ok(chunk) => {
+                            for choice in chunk.choices {
+                                if let Some(content) = choice.delta.content {
+                                    content_buffer.push_str(&content);
+                                    yield AgentEvent::TextChunk(content);
+                                }
 
-                                    if let Some(function) = tool_call.function {
-                                        if let Some(name) = function.name {
-                                            entry.name = Some(name);
+                                if let Some(tool_calls) = choice.delta.tool_calls {
+                                    for tool_call in tool_calls {
+                                        // get or create the value for tool_call.index
+                                        let entry = pending_tool_calls
+                                            .entry(tool_call.index)
+                                            .or_default();
+
+                                        if let Some(id) = tool_call.id {
+                                            entry.id = Some(id);
                                         }
 
-                                        if let Some(arguments) = function.arguments {
-                                            entry.arguments.push_str(&arguments);
+                                        if let Some(function) = tool_call.function {
+                                            if let Some(name) = function.name {
+                                                entry.name = Some(name);
+                                            }
+
+                                            if let Some(arguments) = function.arguments {
+                                                entry.arguments.push_str(&arguments);
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            match choice.finish_reason {
-                                Some(FinishReason::ToolCalls) => {
-                                    let mut pending_calls: Vec<(u32, PendingToolCall)> = pending_tool_calls
-                                        .drain()
-                                        .collect();
-                                    pending_calls.sort_by_key(|(index, _)| *index);
+                                match choice.finish_reason {
+                                    Some(FinishReason::ToolCalls) => {
+                                        let mut pending_calls: Vec<(u32, PendingToolCall)> = pending_tool_calls
+                                            .drain()
+                                            .collect();
+                                        pending_calls.sort_by_key(|(index, _)| *index);
 
-                                    let mut records: Vec<ToolCallRecord> = Vec::new();
-                                    let mut dispatchable: Vec<(String, String, Value)> = Vec::new();
+                                        let mut records: Vec<ToolCallRecord> = Vec::new();
+                                        let mut dispatchable: Vec<(String, String, Value)> = Vec::new();
 
-                                    for (_, pending_call) in pending_calls {
-                                        let Some(id) = pending_call.id else {
-                                            yield AgentEvent::Error(
-                                                "tool_call missing id, skipping".to_string(),
-                                            );
-                                            continue;
-                                        };
-                                        let name = pending_call
-                                            .name
-                                            .unwrap_or_else(|| "unknown".to_string());
-                                        let arguments_str = pending_call.arguments;
-                                        let arguments_value = serde_json::from_str(&arguments_str)
-                                            .unwrap_or_else(|_| Value::String(arguments_str.clone()));
+                                        for (_, pending_call) in pending_calls {
+                                            let Some(id) = pending_call.id else {
+                                                yield AgentEvent::Error(
+                                                    "tool_call missing id, skipping".to_string(),
+                                                );
+                                                continue;
+                                            };
+                                            let name = pending_call
+                                                .name
+                                                .unwrap_or_else(|| "unknown".to_string());
+                                            let arguments_str = pending_call.arguments;
+                                            let arguments_value = serde_json::from_str(&arguments_str)
+                                                .unwrap_or_else(|_| Value::String(arguments_str.clone()));
 
-                                        records.push(ToolCallRecord {
-                                            id: id.clone(),
-                                            name: name.clone(),
-                                            arguments: arguments_str,
-                                        });
-                                        dispatchable.push((id, name, arguments_value));
-                                    }
-
-                                    if !records.is_empty() {
-                                        let content = if content_buffer.is_empty() {
-                                            None
-                                        } else {
-                                            Some(std::mem::take(&mut content_buffer))
-                                        };
-                                        if let Err(e) = memory.update(Message::Assistant {
-                                            content,
-                                            tool_calls: records,
-                                        }) {
-                                            yield AgentEvent::Error(format!(
-                                                "Failed to record assistant message: {}",
-                                                e
-                                            ));
+                                            records.push(ToolCallRecord {
+                                                id: id.clone(),
+                                                name: name.clone(),
+                                                arguments: arguments_str,
+                                            });
+                                            dispatchable.push((id, name, arguments_value));
                                         }
-                                    }
 
-                                    // TODO: we can concurrently run this for the read tool calls but we need to add a category like READ, WRITE to each tool
-                                    for (id, name, args_value) in dispatchable {
-                                        yield AgentEvent::ToolChunk(name.clone(), args_value.clone());
-                                        match self.call_tool(&name, args_value) {
-                                            Ok(output) => {
-                                                if let Err(e) = memory.update(Message::Tool(
-                                                    id.clone(),
-                                                    output.clone(),
-                                                )) {
-                                                    yield AgentEvent::Error(format!(
-                                                        "Failed to record tool result: {}",
-                                                        e
-                                                    ));
-                                                }
-                                                // Dont send the output, it will look ugly and its handled in the main.rs anyways
-                                                // yield AgentEvent::TextChunk(output);
-                                            }
-                                            Err(e) => {
-                                                let err_msg = format!("error: {}", e);
-                                                if let Err(me) =
-                                                    memory.update(Message::Tool(id, err_msg))
-                                                {
-                                                    yield AgentEvent::Error(format!(
-                                                        "Failed to record tool error: {}",
-                                                        me
-                                                    ));
-                                                }
+                                        if !records.is_empty() {
+                                            let content = if content_buffer.is_empty() {
+                                                None
+                                            } else {
+                                                Some(std::mem::take(&mut content_buffer))
+                                            };
+                                            if let Err(e) = memory.update(Message::Assistant {
+                                                content,
+                                                tool_calls: records,
+                                            }) {
                                                 yield AgentEvent::Error(format!(
-                                                    "Tool '{}' error: {}",
-                                                    name, e
+                                                    "Failed to record assistant message: {}",
+                                                    e
                                                 ));
                                             }
                                         }
-                                    }
-                                }
-                                Some(FinishReason::Stop) => {
-                                    if !content_buffer.is_empty() {
-                                        let content = std::mem::take(&mut content_buffer);
-                                        if let Err(e) = memory.update(Message::Assistant {
-                                            content: Some(content),
-                                            tool_calls: vec![],
-                                        }) {
-                                            yield AgentEvent::Error(format!(
-                                                "Failed to record assistant message: {}",
-                                                e
-                                            ));
+
+                                        // TODO: we can concurrently run this for the read tool calls but we need to add a category like READ, WRITE to each tool
+                                        for (id, name, args_value) in dispatchable {
+                                            yield AgentEvent::ToolChunk(name.clone(), args_value.clone());
+                                            match self.call_tool(&name, args_value) {
+                                                Ok(output) => {
+                                                    if let Err(e) = memory.update(Message::Tool(
+                                                        id.clone(),
+                                                        output.clone(),
+                                                    )) {
+                                                        yield AgentEvent::Error(format!(
+                                                            "Failed to record tool result: {}",
+                                                            e
+                                                        ));
+                                                    }
+                                                    // Dont send the output, it will look ugly and its handled in the main.rs anyways
+                                                    // yield AgentEvent::TextChunk(output);
+                                                }
+                                                Err(e) => {
+                                                    let err_msg = format!("error: {}", e);
+                                                    if let Err(me) =
+                                                        memory.update(Message::Tool(id, err_msg))
+                                                    {
+                                                        yield AgentEvent::Error(format!(
+                                                            "Failed to record tool error: {}",
+                                                            me
+                                                        ));
+                                                    }
+                                                    yield AgentEvent::Error(format!(
+                                                        "Tool '{}' error: {}",
+                                                        name, e
+                                                    ));
+                                                }
+                                            }
                                         }
                                     }
+                                    Some(FinishReason::Stop) => {
+                                        if !content_buffer.is_empty() {
+                                            let content = std::mem::take(&mut content_buffer);
+                                            if let Err(e) = memory.update(Message::Assistant {
+                                                content: Some(content),
+                                                tool_calls: vec![],
+                                            }) {
+                                                yield AgentEvent::Error(format!(
+                                                    "Failed to record assistant message: {}",
+                                                    e
+                                                ));
+                                            }
+                                        };
+                                        yield AgentEvent::Done;
+                                        return;
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
+                        Err(err) => {
+                            yield AgentEvent::Error(err.to_string())
+                        }
                     }
-                    Err(err) => {
-                        yield AgentEvent::Error(err.to_string())
-                    }
-                }
-            };
+                };
+            }
         };
         Box::pin(stream)
     }
