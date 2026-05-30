@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .map(|v| v.to_string().chars().take(30).collect::<String>())
                                 .collect();
                             let args_preview = args_values.join(",");
-                            log!(Ansi::Green, "({})", args_preview);
+                            log!(Ansi::Green, "{}({})", name.to_uppercase(), args_preview);
                             match agent.call_tool(&name.to_string(), args) {
                                 Ok(result) => {
                                     let result_lines: Vec<&str> = result.split("\n").collect();

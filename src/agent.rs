@@ -212,8 +212,9 @@ impl Agent {
                                 for (_, pending_call) in pending_calls {
                                     let name = pending_call.name.unwrap_or_else(|| "unknown".to_string());
                                     let arguments_value = serde_json::from_str(&pending_call.arguments)
-                                        .unwrap_or_else(|_| Value::String(pending_call.arguments));
+                                    .unwrap_or_else(|_| Value::String(pending_call.arguments));
 
+                                    yield AgentEvent::ToolChunk(name.clone(),arguments_value.clone());
                                     match self.call_tool(&name, arguments_value) {
                                         Ok(output) => {
                                             yield AgentEvent::TextChunk(output);
