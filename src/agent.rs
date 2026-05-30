@@ -8,8 +8,8 @@ use async_openai::{
     config::OpenAIConfig,
     types::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs, CreateChatCompletionRequest, ChatCompletionTool, ChatCompletionToolType,
-        FunctionObject, ChatCompletionToolChoiceOption,
+        ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
+        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FinishReason, FunctionObject,
     },
 };
 use serde_json::Value;
@@ -29,7 +29,7 @@ pub struct Agent {
     pub client: Client<OpenAIConfig>,
     tools: HashMap<String, Tool>,
 }
-    pub struct Tool {
+pub struct Tool {
     pub name: String,
     pub description: String,
     pub callback: fn(serde_json::Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>>,
@@ -85,6 +85,12 @@ impl Agent {
     pub fn chat<'a>(&'a self, prompt: &'a str) -> AgentEventStream<'a> {
         let model = std::env::var("MODEL_NAME").unwrap_or(DEFAULT_MODEL.to_string());
         let stream = async_stream::stream! {
+            #[derive(Default)]
+            struct PendingToolCall {
+                id: Option<String>,
+                name: Option<String>,
+                arguments: String,
+            }
 
             // TODO: add messages memory and roles
 
@@ -157,6 +163,14 @@ impl Agent {
                     return;
                 }
             };
+
+            // Tool call streaming
+            // Chunk 1: { "delta": { "tool_calls": [{ "index": 0, "id": "call_1" }] } }
+            // Chunk 2: { "delta": { "tool_calls": [{ "index": 0, "function": { "name": "read_file" } }] } }
+            // Chunk 3: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "{\"path\":\"src/" } }] } }
+            // Chunk 4: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "main.rs\"}" } }] } }
+            // Final:   { "finish_reason": "tool_calls" }
+            let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
             while let Some(chunk_result) = response.next().await {
                 match chunk_result {
                     Ok(chunk) => {
@@ -167,31 +181,46 @@ impl Agent {
 
                             if let Some(tool_calls) = choice.delta.tool_calls {
                                 for tool_call in tool_calls {
-                                    let tool_call_id = tool_call.id.as_deref().unwrap_or("unknown");
+                                    // get or create the value for tool_call.index
+                                    let entry = pending_tool_calls
+                                        .entry(tool_call.index)
+                                        .or_default();
+
+                                    if let Some(id) = tool_call.id {
+                                        entry.id = Some(id);
+                                    }
 
                                     if let Some(function) = tool_call.function {
-                                        let name = function.name.unwrap_or_else(|| "unknown".to_string());
-                                        let arguments = function.arguments.unwrap_or_default();
-                                        let arguments_value = serde_json::from_str(&arguments)
-                                            .unwrap_or_else(|_| Value::String(arguments.clone()));
-
-                                        // execute the tool and yield its output
-                                        match self.call_tool(&name, arguments_value.clone()) {
-                                            Ok(output) => {
-                                                // first indicate the tool was called
-                                                yield AgentEvent::ToolChunk(name.clone(), arguments_value.clone());
-                                                // then yield the tool output as text
-                                                yield AgentEvent::TextChunk(output);
-                                            }
-                                            Err(e) => {
-                                                yield AgentEvent::Error(format!("Tool '{}' error: {}", name, e));
-                                            }
+                                        if let Some(name) = function.name {
+                                            entry.name = Some(name);
                                         }
-                                    } else {
-                                        yield AgentEvent::ToolChunk(
-                                            tool_call_id.to_string(),
-                                            Value::Null,
-                                        );
+
+                                        if let Some(arguments) = function.arguments {
+                                            entry.arguments.push_str(&arguments);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if matches!(choice.finish_reason, Some(FinishReason::ToolCalls)) {
+                                let mut pending_calls: Vec<(u32, PendingToolCall)> = pending_tool_calls
+                                    .drain()
+                                    .collect();
+                                pending_calls.sort_by_key(|(index, _)| *index);
+
+                                // TODO: we can concurrently run this for the read tool calls but we need to add a category like READ, WRITE to each tool
+                                for (_, pending_call) in pending_calls {
+                                    let name = pending_call.name.unwrap_or_else(|| "unknown".to_string());
+                                    let arguments_value = serde_json::from_str(&pending_call.arguments)
+                                        .unwrap_or_else(|_| Value::String(pending_call.arguments));
+
+                                    match self.call_tool(&name, arguments_value) {
+                                        Ok(output) => {
+                                            yield AgentEvent::TextChunk(output);
+                                        }
+                                        Err(e) => {
+                                            yield AgentEvent::Error(format!("Tool '{}' error: {}", name, e));
+                                        }
                                     }
                                 }
                             }
