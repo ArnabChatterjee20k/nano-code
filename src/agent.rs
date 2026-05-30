@@ -164,7 +164,7 @@ impl Agent {
                 }
             };
 
-            // Tool call streaming
+            // Tool call streaming(based on the index we can determine the tool in case of multi tool streaming)
             // Chunk 1: { "delta": { "tool_calls": [{ "index": 0, "id": "call_1" }] } }
             // Chunk 2: { "delta": { "tool_calls": [{ "index": 0, "function": { "name": "read_file" } }] } }
             // Chunk 3: { "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "{\"path\":\"src/" } }] } }
