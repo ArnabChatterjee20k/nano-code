@@ -1,4 +1,5 @@
 mod agent;
+mod memory;
 mod tools;
 use dotenvy::dotenv;
 use futures::StreamExt;
@@ -7,6 +8,7 @@ use std::io::Write;
 use std::{fmt, io, result};
 
 use crate::agent::{Agent, AgentEvent};
+use crate::memory::Memory;
 use crate::tools::get_tools;
 #[allow(dead_code)]
 #[derive(Debug, Copy, Clone)]
@@ -53,7 +55,18 @@ macro_rules! log_separator {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
+
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let system_content = format!(
+        "You are the assistant. Current working directory: {}. When useful, call the available tools to perform file and shell operations.",
+        cwd
+    );
+
     let agent = Agent::new(get_tools());
+    let mut memory = Memory::new(system_content.as_str());
     log!(Ansi::Bold, "nano-code");
     loop {
         log_separator!();
@@ -73,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             _ => {
-                let mut response = agent.chat(value);
+                let mut response = agent.chat(value, &mut memory);
                 while let Some(event) = response.next().await {
                     match event {
                         AgentEvent::TextChunk(text) => {

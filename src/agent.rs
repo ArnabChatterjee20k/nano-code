@@ -7,13 +7,13 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
         CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FinishReason, FunctionObject,
     },
 };
 use serde_json::Value;
 
+use crate::memory::{Memory, Message};
 use crate::tools::ToolResult;
 
 const DEFAULT_MODEL: &str = "google/gemini-3.5-flash";
@@ -29,6 +29,7 @@ pub struct Agent {
     pub client: Client<OpenAIConfig>,
     tools: HashMap<String, Tool>,
 }
+
 pub struct Tool {
     pub name: String,
     pub description: String,
@@ -67,6 +68,7 @@ impl Agent {
         let client = Client::with_config(config);
         let tools_schema =
             HashMap::from_iter(tools.into_iter().map(|tool| (tool.name.clone(), tool)));
+
         return Agent {
             client,
             tools: tools_schema,
@@ -82,7 +84,7 @@ impl Agent {
         (tool.callback)(args)
     }
 
-    pub fn chat<'a>(&'a self, prompt: &'a str) -> AgentEventStream<'a> {
+    pub fn chat<'a>(&'a self, prompt: &'a str, memory: &'a mut Memory) -> AgentEventStream<'a> {
         let model = std::env::var("MODEL_NAME").unwrap_or(DEFAULT_MODEL.to_string());
         let stream = async_stream::stream! {
             #[derive(Default)]
@@ -92,39 +94,10 @@ impl Agent {
                 arguments: String,
             }
 
-            // TODO: add messages memory and roles
-
-            // here using manual match instead of ? or unwrap due to stream macro
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| ".".to_string());
-            let system_content = format!(
-                "You are the assistant. Current working directory: {}. When useful, call the available tools to perform file and shell operations.",
-                cwd
-            );
-            let system_msg = match ChatCompletionRequestSystemMessageArgs::default()
-                .content(system_content)
-                .build()
-            {
-                Ok(msg) => msg.into(),
-                Err(e) => {
-                    yield AgentEvent::Error(format!("Failed to build system message: {}", e));
-                    return;
-                }
-            };
-
-            let user_msg = match ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
-                .build()
-            {
-                Ok(msg) => msg.into(),
-                Err(e) => {
-                    yield AgentEvent::Error(format!("Failed to build user message: {}", e));
-                    return;
-                }
-            };
-
-            let messages = vec![system_msg, user_msg];
+            if let Err(e) = memory.update(Message::User(prompt.into())) {
+                yield AgentEvent::Error(format!("Failed to update memory: {}", e));
+                return;
+            }
 
             // build tool definitions from the registered tools so the model can call them
             let tools_defs: Vec<ChatCompletionTool> = self
@@ -145,7 +118,7 @@ impl Agent {
             let request: CreateChatCompletionRequest = match CreateChatCompletionRequestArgs::default()
                 .model(model)
                 .max_tokens(8162 as u32)
-                .messages(messages)
+                .messages(memory.messages().clone())
                 .tools(tools_defs)
                 .tool_choice(ChatCompletionToolChoiceOption::Auto)
                 .build()
