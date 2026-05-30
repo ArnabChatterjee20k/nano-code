@@ -240,7 +240,8 @@ impl Agent {
                                                         e
                                                     ));
                                                 }
-                                                yield AgentEvent::TextChunk(output);
+                                                // Dont send the output, it will look ugly and its handled in the main.rs anyways
+                                                // yield AgentEvent::TextChunk(output);
                                             }
                                             Err(e) => {
                                                 let err_msg = format!("error: {}", e);
