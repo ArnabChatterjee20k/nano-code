@@ -93,34 +93,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             log!(Ansi::Cyan, "{}", text);
                         }
                         AgentEvent::ToolChunk(name, args) => {
-                            let args_values: Vec<String> = args
+                            let args_preview = args
                                 .as_object()
-                                .unwrap()
-                                .values()
-                                .map(|v| v.to_string().chars().take(30).collect::<String>())
-                                .collect();
-                            let args_preview = args_values.join(",");
+                                .map(|obj| {
+                                    obj.values()
+                                        .map(|v| v.to_string().chars().take(30).collect::<String>())
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                })
+                                .unwrap_or_default();
                             log!(Ansi::Green, "{}({})", name.to_uppercase(), args_preview);
-                            match agent.call_tool(&name.to_string(), args) {
-                                Ok(result) => {
-                                    let result_lines: Vec<&str> = result.split("\n").collect();
-                                    let preview = result_lines[0];
-
-                                    let mut first_60 = preview.chars().take(60).collect::<String>();
-
-                                    if result_lines.len() > 1 {
-                                        first_60.push_str(&format!(
-                                            "... + {} lines",
-                                            result_lines.len() - 1
-                                        ));
-                                    }
-
-                                    log!(Ansi::Dim, "⎿ {}", first_60);
-                                }
-                                Err(e) => {
-                                    log!(Ansi::Red, "Error {}", e);
-                                }
+                        }
+                        AgentEvent::ToolResult(_name, output) => {
+                            let mut lines = output.lines();
+                            let first = lines.next().unwrap_or("");
+                            let mut preview = first.chars().take(60).collect::<String>();
+                            let rest = lines.count();
+                            if rest > 0 {
+                                preview.push_str(&format!("... + {} lines", rest));
+                            } else if first.chars().count() > 60 {
+                                preview.push('…');
                             }
+                            log!(Ansi::Dim, "⎿ {}", preview);
                         }
                         AgentEvent::Error(e) => {
                             log!(Ansi::Red, "Error {}", e);

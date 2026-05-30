@@ -21,8 +21,9 @@ const DEFAULT_MODEL: &str = "google/gemini-3.5-flash";
 pub enum AgentEvent {
     TextChunk(String),
     ToolChunk(String, serde_json::Value),
+    ToolResult(String, String),
     Error(String),
-    Done
+    Done,
 }
 pub type AgentEventStream<'a> =
     std::pin::Pin<Box<dyn futures::Stream<Item = AgentEvent> + Send + 'a>>;
@@ -252,8 +253,7 @@ impl Agent {
                                                             e
                                                         ));
                                                     }
-                                                    // Dont send the output, it will look ugly and its handled in the main.rs anyways
-                                                    // yield AgentEvent::TextChunk(output);
+                                                    yield AgentEvent::ToolResult(name.clone(), output);
                                                 }
                                                 Err(e) => {
                                                     let err_msg = format!("error: {}", e);
