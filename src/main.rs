@@ -90,7 +90,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 while let Some(event) = response.next().await {
                     match event {
                         AgentEvent::TextChunk(text) => {
-                            log!(Ansi::Cyan, "{}", text);
+                            print!("{}{}{}", Ansi::Cyan, text, Ansi::Reset);
+                            io::stdout().flush()?;
                         }
                         AgentEvent::ToolChunk(name, args) => {
                             let args_preview = args
@@ -119,7 +120,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         AgentEvent::Error(e) => {
                             log!(Ansi::Red, "Error {}", e);
                         }
-                        AgentEvent::Done => {}
+                        AgentEvent::Done => {
+                            println!();
+                        }
                     }
                 }
             }
