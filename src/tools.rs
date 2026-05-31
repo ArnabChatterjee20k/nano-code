@@ -35,7 +35,7 @@ pub fn edit(path: &str, old: &str, new: &str, all: bool) -> ToolResult {
     }
 
     let multiple_matches = matched_indices.next().is_some();
-    if (multiple_matches && !all) {
+    if multiple_matches && !all {
         return Err(format!(
             "Error: The old text has multiple matches. Use (all=true) to replace all"
         )
@@ -109,6 +109,20 @@ pub fn grep(pattern: &str, base: &str, limit: Option<usize>) -> ToolResult {
         .collect::<Vec<String>>()
         .join("\n"))
 }
+pub fn list(path: &str) -> ToolResult {
+    let mut files: Vec<String> = fs::read_dir(path)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().into_string().unwrap_or_default())
+        .collect();
+    files.sort();
+    Ok(files.join("\n"))
+}
+
+pub fn tool_list(args: Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let path = args["path"].as_str().ok_or("missing 'path'")?;
+    list(path)
+}
+
 pub fn bash(cmd: &str) -> ToolResult {
     let out = std::process::Command::new("sh")
         .arg("-c")
@@ -251,6 +265,18 @@ pub fn get_tools() -> Vec<Tool> {
                     "cmd": { "type": "string" }
                 },
                 "required": ["cmd"]
+            })),
+        },
+        Tool {
+            name: "list".to_string(),
+            description: "List files in a directory.".to_string(),
+            callback: tool_list as fn(Value) -> _,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"]
             })),
         },
     ]
@@ -509,5 +535,30 @@ mod tests {
     fn bash_returns_empty_marker_when_no_output() {
         let out = bash("true").unwrap();
         assert_eq!(out, "(empty)");
+    }
+
+    // ---------- list ----------
+
+    #[test]
+    fn list_finds_all_files_in_directory() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().to_str().unwrap();
+        fs::write(dir.path().join("a.txt"), "").unwrap();
+        fs::write(dir.path().join("b.md"), "").unwrap();
+        fs::write(dir.path().join("c.rs"), "").unwrap();
+
+        let out = list(base).unwrap();
+        assert!(out.contains("a.txt"));
+        assert!(out.contains("b.md"));
+        assert!(out.contains("c.rs"));
+    }
+
+    #[test]
+    fn list_returns_empty_when_directory_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().to_str().unwrap();
+
+        let out = list(base).unwrap();
+        assert_eq!(out, "");
     }
 }
