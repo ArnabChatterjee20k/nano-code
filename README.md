@@ -1,10 +1,13 @@
-A single file nano implementation of claude-code, codex, etc with support for tool calling, code repo indexing,etc
+A mini implementation of claude-code, codex, etc with support for tool calling,etc
+* For exploring rust and its eco-system
 
-/clear, /quit, /index
 
 ### TODO
-[] Permissions based for each action
+[] Indexing
+[] Permissions based for each action and maintaining a config have them saved
 [] Mutation queue for write/edit actions to have a serialized write on the same file
 [] Long term memory support
 [] Sessions and parallelism targetting
 [] Sandboxing
+
+* Inspired from the famous python nano-code implementation
