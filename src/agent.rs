@@ -124,12 +124,15 @@ impl Agent {
                     yield AgentEvent::Error("Max iterations exceeded".to_string());
                     return;
                 }
+                // Keep the context window bounded: compact summarizes old history once
+                // it crosses the threshold. No-op (cheap token count) when under budget.
+                memory.compact(&self.client, &model).await;
                 // since we are catching the error ourselves and sending via stream we can't use ? in any of the build() now
                 // and manually need to match the build output
                 let request: CreateChatCompletionRequest = match CreateChatCompletionRequestArgs::default()
                     .model(model.clone())
                     .max_tokens(8162 as u32)
-                    .messages(memory.messages().clone())
+                    .messages(memory.messages())
                     .tools(tools_defs.clone())
                     .tool_choice(ChatCompletionToolChoiceOption::Auto)
                     .build()
